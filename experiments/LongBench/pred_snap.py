@@ -173,7 +173,7 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
                     low_cpu_mem_usage=True,
                     device_map="auto",
                     use_cache=True,
-                    use_flash_attention_2=True
+                    attn_implementation="eager"
                 )
         else:
             model = AutoModelForCausalLM.from_pretrained(
@@ -182,7 +182,7 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
                     low_cpu_mem_usage=True,
                     device_map="auto",
                     use_cache=True,
-                    use_flash_attention_2=True
+                    attn_implementation="eager"
                 )
         tokenizer = AutoTokenizer.from_pretrained(
             path,
@@ -196,7 +196,7 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
                     low_cpu_mem_usage=True,
                     device_map="auto",
                     use_cache=True,
-                    use_flash_attention_2=True
+                    attn_implementation="eager"
                 )
         else:
             model = AutoModelForCausalLM.from_pretrained(
@@ -205,7 +205,7 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
                     low_cpu_mem_usage=True,
                     device_map="auto",
                     use_cache=True,
-                    use_flash_attention_2=True
+                    attn_implementation="eager"
                 )
         tokenizer = AutoTokenizer.from_pretrained(
             path,
@@ -219,7 +219,7 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
                 low_cpu_mem_usage=True,
                 device_map="auto",
                 use_cache=True,
-                use_flash_attention_2=True
+                attn_implementation="eager"
             )
         else:
             model = AutoModelForCausalLM.from_pretrained(
@@ -228,7 +228,7 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
                 low_cpu_mem_usage=True,
                 device_map="auto",
                 use_cache=True,
-                use_flash_attention_2=True
+                attn_implementation="eager"
             )
         tokenizer = AutoTokenizer.from_pretrained(
             path,
@@ -243,7 +243,7 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
                 low_cpu_mem_usage=True,
                 device_map="auto",
                 use_cache=True,
-                use_flash_attention_2=True
+                attn_implementation="eager"
             )
         else:
             model = AutoModelForCausalLM.from_pretrained(
@@ -252,7 +252,7 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
                 low_cpu_mem_usage=True,
                 device_map="auto",
                 use_cache=True,
-                use_flash_attention_2=True
+                attn_implementation="eager"
             )
         tokenizer = AutoTokenizer.from_pretrained(
             path,

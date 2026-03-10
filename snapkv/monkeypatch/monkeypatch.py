@@ -51,15 +51,14 @@ def replace_mistral():
     transformers_version = check_version()
 
     if _is_modern_transformers():
-        # For modern transformers, Mistral also uses unified attention
-        # For now, print a warning — the Llama hijack pattern can be adapted
-        print(f"[SnapKV] Mistral support for transformers {transformers_version}: "
-              f"Use replace_llama() — modern Mistral uses similar unified attention.")
-        warnings.warn(
-            "Mistral monkeypatch for modern transformers not yet implemented. "
-            "If your model is Mistral-based, the Llama hijack may work if the model "
-            "uses LlamaAttention internally (many Mistral models do in modern transformers)."
+        # Modern transformers: MistralAttention has the same forward signature as LlamaAttention
+        from snapkv.monkeypatch.llama_hijack_modern import (
+            llama_attention_forward_modern,
+            prepare_inputs_for_generation_llama_modern,
         )
+        print(f"[SnapKV] Using modern hijack for MistralAttention (transformers {transformers_version})")
+        transformers.models.mistral.modeling_mistral.MistralAttention.forward = llama_attention_forward_modern
+        transformers.models.mistral.modeling_mistral.MistralForCausalLM.prepare_inputs_for_generation = prepare_inputs_for_generation_llama_modern
     else:
         from snapkv.monkeypatch.mistral_hijack_4_37 import (
             mistral_flash_attn2_forward as mistral_flash_attn2_forward_4_37,
