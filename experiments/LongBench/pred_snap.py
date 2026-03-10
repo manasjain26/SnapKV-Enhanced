@@ -1,4 +1,5 @@
 import os
+os.environ["HF_DATASETS_TRUST_REMOTE_CODE"] = "1"  # Allow LongBench loading script
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from datasets import load_dataset
 import json
@@ -308,12 +309,12 @@ if __name__ == '__main__':
         compress_args = None
         write_model_name = model_name
     if args.e:
-        data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test', trust_remote_code=True)
+        data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
         if not os.path.exists(f"pred_e/{write_model_name}"):
             os.makedirs(f"pred_e/{write_model_name}")
         out_path = f"pred_e/{write_model_name}/{dataset}.jsonl"
     else:
-        data = load_dataset('THUDM/LongBench', dataset, split='test', trust_remote_code=True)
+        data = load_dataset('THUDM/LongBench', dataset, split='test')
         if not os.path.exists(f"pred_e/{write_model_name}"):
             os.makedirs(f"pred_e/{write_model_name}")
         out_path = f"pred_e/{write_model_name}/{dataset}.jsonl"
