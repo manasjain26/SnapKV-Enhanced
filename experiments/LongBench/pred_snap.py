@@ -72,7 +72,10 @@ def get_pred_single_gpu(data, max_length, max_gen,
                         window_sizes = None,
                         max_capacity_prompts = None,
                         kernel_sizes = None,
-                        pooling = None):
+                        pooling = None,
+                        num_obs_windows = 1,
+                        protect_spikes = False,
+                        spike_reserve_ratio = 0.1):
     # device = torch.device(f'cuda:{rank}')
     # device = model.device
     model, tokenizer = load_model_and_tokenizer(model2path[model_name], model_name, device = "cuda", compress=compress)
@@ -95,6 +98,10 @@ def get_pred_single_gpu(data, max_length, max_gen,
                 model.model.layers[i].self_attn.config.max_capacity_prompt = max_capacity_prompts[i]
                 model.model.layers[i].self_attn.config.kernel_size = kernel_sizes[i]
                 model.model.layers[i].self_attn.config.pooling = pooling
+                # [SnapKV-Enhanced] set enhancement parameters
+                model.model.layers[i].self_attn.config.num_obs_windows = num_obs_windows
+                model.model.layers[i].self_attn.config.protect_spikes = protect_spikes
+                model.model.layers[i].self_attn.config.spike_reserve_ratio = spike_reserve_ratio
         ############################################################################################################
         
         prompt = prompt_format.format(**json_obj)

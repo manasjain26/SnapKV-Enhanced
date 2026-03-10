@@ -1,0 +1,9 @@
+{
+    "window_sizes": 32,
+    "max_capacity_prompts": 2048,
+    "kernel_sizes": 5,
+    "pooling": "avgpool",
+    "num_obs_windows": 1,
+    "protect_spikes": true,
+    "spike_reserve_ratio": 0.1
+}
