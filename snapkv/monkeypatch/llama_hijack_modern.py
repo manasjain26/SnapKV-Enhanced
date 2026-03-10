@@ -47,124 +47,90 @@ def llama_attention_forward_modern(
     cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
-    # [SnapKV] Expand to num_attention_heads before compression
-    key_states_expanded = repeat_kv(key_states, self.num_key_value_groups)
-    value_states_expanded = repeat_kv(value_states, self.num_key_value_groups)
-
     bsz, num_heads, q_len, head_dim = query_states.shape
 
+    # Resolve the attention interface once
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+    if self.config._attn_implementation == "eager":
+        from transformers.models.llama.modeling_llama import eager_attention_forward
+        attention_interface = eager_attention_forward
+    elif self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
+        from transformers.models.llama.modeling_llama import eager_attention_forward
+        attention_interface = eager_attention_forward
+    else:
+        attention_interface = ALL_ATTENTION_FUNCTIONS.get(
+            self.config._attn_implementation, None
+        )
+        if attention_interface is None:
+            from transformers.models.llama.modeling_llama import eager_attention_forward
+            attention_interface = eager_attention_forward
+
     if past_key_value is not None:
-        # Determine if this is the prefill phase (first forward pass)
         past_seen = past_key_value.get_seq_length(self.layer_idx)
 
         if past_seen == 0:
             # === PREFILL PHASE: Apply SnapKV compression ===
-            self._snapkv_seq_len = q_len
 
-            # Compress KV cache using SnapKV
-            key_states_compressed, value_states_compressed = self.kv_cluster.update_kv(
+            # Expand KV to num_attention_heads ONLY for SnapKV compression
+            key_states_expanded = repeat_kv(key_states, self.num_key_value_groups)
+            value_states_expanded = repeat_kv(value_states, self.num_key_value_groups)
+
+            # Compress using SnapKV (operates on expanded heads)
+            key_compressed_exp, value_compressed_exp = self.kv_cluster.update_kv(
                 key_states_expanded, query_states, value_states_expanded,
                 attention_mask, self.num_key_value_groups
             )
 
-            # For the current forward pass, use compressed KV for attention
-            # But we need to do full attention for the prefill to get correct output
-            # So we compute attention with full KV, then store compressed KV in cache
-
-            # --- Full attention for this prefill step ---
-            # Use the attention_interface from the original code path
-            from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-            attention_interface: Callable = None
-            if self.config._attn_implementation == "eager":
-                from transformers.models.llama.modeling_llama import eager_attention_forward
-                attention_interface = eager_attention_forward
-            else:
-                if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
-                    from transformers.models.llama.modeling_llama import eager_attention_forward
-                    attention_interface = eager_attention_forward
-                else:
-                    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-
+            # Do full attention for the prefill output
+            # NOTE: attention_interface internally calls repeat_kv,
+            # so we pass the ORIGINAL (unexpanded) key/value states
             attn_output, attn_weights = attention_interface(
                 self,
                 query_states,
-                key_states_expanded,
-                value_states_expanded,
+                key_states,
+                value_states,
                 attention_mask,
                 dropout=0.0 if not self.training else self.attention_dropout,
                 scaling=self.scaling,
                 **kwargs,
             )
 
-            # --- Store COMPRESSED KV in cache ---
-            # We need to convert back to num_key_value_heads if using GQA
+            # Store COMPRESSED KV in cache (reduced back to num_kv_heads)
             if self.num_key_value_groups > 1:
-                # Take every num_key_value_groups-th head from compressed
-                kv_heads = key_states.shape[1]  # num_key_value_heads
-                # compressed is [bsz, num_attention_heads, compressed_len, head_dim]
-                # We need [bsz, num_key_value_heads, compressed_len, head_dim]
-                # For GQA, all heads in a group see the same KV, so just take the first of each group
-                compressed_len = key_states_compressed.shape[2]
-                k_for_cache = key_states_compressed[:, ::self.num_key_value_groups, :, :]
-                v_for_cache = value_states_compressed[:, ::self.num_key_value_groups, :, :]
+                k_for_cache = key_compressed_exp[:, ::self.num_key_value_groups, :, :]
+                v_for_cache = value_compressed_exp[:, ::self.num_key_value_groups, :, :]
             else:
-                k_for_cache = key_states_compressed
-                v_for_cache = value_states_compressed
+                k_for_cache = key_compressed_exp
+                v_for_cache = value_compressed_exp
 
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             past_key_value.update(k_for_cache, v_for_cache, self.layer_idx, cache_kwargs)
 
         else:
             # === DECODE PHASE: Normal attention with cached KV ===
-            self._snapkv_seq_len = past_seen + q_len
-
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(
                 key_states, value_states, self.layer_idx, cache_kwargs
             )
 
-            key_states_expanded = repeat_kv(key_states, self.num_key_value_groups)
-            value_states_expanded = repeat_kv(value_states, self.num_key_value_groups)
-
-            from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-            attention_interface: Callable = None
-            if self.config._attn_implementation == "eager":
-                from transformers.models.llama.modeling_llama import eager_attention_forward
-                attention_interface = eager_attention_forward
-            else:
-                if self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
-                    from transformers.models.llama.modeling_llama import eager_attention_forward
-                    attention_interface = eager_attention_forward
-                else:
-                    attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-
+            # attention_interface handles repeat_kv internally
             attn_output, attn_weights = attention_interface(
                 self,
                 query_states,
-                key_states_expanded,
-                value_states_expanded,
+                key_states,
+                value_states,
                 attention_mask,
                 dropout=0.0 if not self.training else self.attention_dropout,
                 scaling=self.scaling,
                 **kwargs,
             )
     else:
-        # No cache - just do normal attention
-        from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-        from transformers.models.llama.modeling_llama import eager_attention_forward
-
-        if self.config._attn_implementation == "eager":
-            attention_interface = eager_attention_forward
-        elif self.config._attn_implementation == "sdpa" and kwargs.get("output_attentions", False):
-            attention_interface = eager_attention_forward
-        else:
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-
+        # No cache — normal attention
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
-            key_states_expanded,
-            value_states_expanded,
+            key_states,
+            value_states,
             attention_mask,
             dropout=0.0 if not self.training else self.attention_dropout,
             scaling=self.scaling,
