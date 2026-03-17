@@ -71,6 +71,13 @@ def llama_attention_forward_modern(
         if past_seen == 0:
             # === PREFILL PHASE: Apply SnapKV compression ===
 
+            # [SnapKV] Track actual input length so prepare_inputs_for_generation
+            # knows all tokens have been processed (cache length != input length
+            # after compression).
+            if not hasattr(self, 'kv_seq_len'):
+                self.kv_seq_len = 0
+            self.kv_seq_len = q_len
+
             # Expand KV to num_attention_heads ONLY for SnapKV compression
             key_states_expanded = repeat_kv(key_states, self.num_key_value_groups)
             value_states_expanded = repeat_kv(value_states, self.num_key_value_groups)
@@ -108,6 +115,8 @@ def llama_attention_forward_modern(
 
         else:
             # === DECODE PHASE: Normal attention with cached KV ===
+            self.kv_seq_len += q_len
+
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(
                 key_states, value_states, self.layer_idx, cache_kwargs
@@ -147,23 +156,22 @@ def prepare_inputs_for_generation_llama_modern(
 ):
     """
     Modern prepare_inputs_for_generation for Llama with SnapKV support.
-    Resets SnapKV seq length tracking when starting a new generation.
+    Uses kv_seq_len (actual tokens processed) instead of cache.seen_tokens
+    (compressed cache length) to correctly identify which tokens are new.
     """
     if past_key_values is None:
-        # Reset SnapKV state for new generation
         for layer in self.model.layers:
-            if hasattr(layer.self_attn, '_snapkv_seq_len'):
-                layer.self_attn._snapkv_seq_len = 0
+            layer.self_attn.kv_seq_len = 0
 
-    # Call the original prepare_inputs_for_generation
-    # We need to replicate the essential logic here
     if past_key_values is not None:
         if isinstance(past_key_values, Cache):
             cache_length = past_key_values.get_seq_length()
-            past_length = past_key_values.seen_tokens
+            # Use the actual tokens processed (kv_seq_len), NOT cache.seen_tokens
+            # which reflects the compressed cache size after SnapKV.
+            past_length = self.model.layers[0].self_attn.kv_seq_len
             max_cache_length = getattr(past_key_values, 'get_max_length', lambda: None)()
         else:
-            cache_length = past_length = past_key_values[0][0].shape[2]
+            cache_length = past_length = self.model.layers[0].self_attn.kv_seq_len
             max_cache_length = None
 
         if attention_mask is not None and attention_mask.shape[1] > input_ids.shape[1]:
@@ -185,10 +193,9 @@ def prepare_inputs_for_generation_llama_modern(
         if past_key_values:
             position_ids = position_ids[:, -input_ids.shape[1]:]
 
-    # Handle cache_position for modern transformers
     cache_position = kwargs.get("cache_position", None)
     if cache_position is None:
-        past_seen = past_key_values.get_seq_length() if past_key_values is not None else 0
+        past_seen = self.model.layers[0].self_attn.kv_seq_len if past_key_values is not None else 0
         cache_position = torch.arange(
             past_seen, past_seen + input_ids.shape[1], device=input_ids.device
         )

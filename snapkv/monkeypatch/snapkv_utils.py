@@ -54,6 +54,11 @@ class SnapKVCluster():
         Compute attention scores from multiple observation windows placed at
         evenly-spaced positions throughout the sequence.
 
+        Each window only sees prefix positions causally reachable by its queries.
+        To prevent early windows from being drowned out (they see fewer positions),
+        we normalize each window's summed attention so all windows contribute on
+        a comparable scale before taking the element-wise max.
+
         Args:
             query_states: [B, H, q_len, D] full query states
             key_states:   [B, H, q_len, D] full key states (before window split)
@@ -65,44 +70,44 @@ class SnapKVCluster():
         bsz, num_heads, q_len, _ = query_states.shape
         prefix_len = q_len - self.window_size
 
-        # Place observation windows at evenly spaced positions
         window_positions = []
         for i in range(self.num_obs_windows):
             if self.num_obs_windows == 1:
-                start = q_len - self.window_size  # original: end only
+                start = q_len - self.window_size
             else:
                 start = int(i * (q_len - self.window_size) / max(1, self.num_obs_windows - 1))
                 start = min(start, q_len - self.window_size)
             window_positions.append(start)
-        # Deduplicate while preserving order
         seen = set()
         window_positions = [s for s in window_positions if not (s in seen or seen.add(s))]
 
         all_attn_sums = []
         for start in window_positions:
             end = start + self.window_size
-            window_q = query_states[:, :, start:end, :]  # [B, H, W, D]
+            window_q = query_states[:, :, start:end, :]
 
-            # Compute attention: window queries attend to all keys in the prefix
-            # Only attend to keys at positions < prefix_len (before the final observation window)
-            prefix_keys = key_states[:, :, :prefix_len, :]  # [B, H, prefix_len, D]
+            prefix_keys = key_states[:, :, :prefix_len, :]
             attn = torch.matmul(window_q, prefix_keys.transpose(2, 3)) / math.sqrt(head_dim)
 
-            # Apply causal mask: query at absolute position (start+i) can only attend to keys at positions <= (start+i)
-            # For windows not at the end, some prefix positions may be "in the future"
             if start < prefix_len:
-                # Create causal mask for this window
-                query_positions = torch.arange(start, end, device=query_states.device)  # [W]
-                key_positions = torch.arange(prefix_len, device=query_states.device)    # [prefix_len]
-                causal_mask = key_positions.unsqueeze(0) > query_positions.unsqueeze(1)  # [W, prefix_len]
+                query_positions = torch.arange(start, end, device=query_states.device)
+                key_positions = torch.arange(prefix_len, device=query_states.device)
+                causal_mask = key_positions.unsqueeze(0) > query_positions.unsqueeze(1)
                 attn = attn.masked_fill(causal_mask.unsqueeze(0).unsqueeze(0), torch.finfo(attn.dtype).min)
 
             attn = nn.functional.softmax(attn, dim=-1, dtype=torch.float32).to(query_states.dtype)
             attn_sum = attn.sum(dim=-2)  # [B, H, prefix_len]
+
+            # Normalize: scale so each window's scores are comparable regardless
+            # of how many prefix positions it can see.  Without this, early windows
+            # (which can only attend to a small fraction of the prefix due to
+            # causal masking) have near-zero scores and are effectively ignored.
+            norm = attn_sum.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            attn_sum = attn_sum / norm * self.window_size  # scale to window_size
+
             all_attn_sums.append(attn_sum)
 
-        # Aggregate across windows: take the max (if ANY window thinks it's important, keep it)
-        aggregated = torch.stack(all_attn_sums, dim=0).max(dim=0).values  # [B, H, prefix_len]
+        aggregated = torch.stack(all_attn_sums, dim=0).max(dim=0).values
         return aggregated
 
     # =========================================================================
@@ -183,8 +188,28 @@ class SnapKVCluster():
 
         return attn_cache
 
+    def _aggregate_gqa_scores(self, scores, num_key_value_groups):
+        """Aggregate attention scores across query heads that share the same KV head.
+
+        For GQA models (e.g. 32 query heads, 8 KV heads, groups=4), each set of
+        4 query heads shares one KV head. We mean-aggregate their scores so the
+        index selection reflects all query heads in the group.
+
+        Args:
+            scores: [B, H_expanded, prefix_len]
+            num_key_value_groups: number of query heads per KV head
+
+        Returns:
+            aggregated: [B, H_kv, prefix_len]
+        """
+        if num_key_value_groups <= 1:
+            return scores
+        bsz, num_expanded, seq_len = scores.shape
+        num_kv_heads = num_expanded // num_key_value_groups
+        scores = scores.view(bsz, num_kv_heads, num_key_value_groups, seq_len)
+        return scores.mean(dim=2)  # [B, H_kv, prefix_len]
+
     def update_kv(self, key_states, query_states, value_states, attention_mask, num_key_value_groups):
-        # check if prefix phase
         assert key_states.shape[-2] == query_states.shape[-2]
         bsz, num_heads, q_len, head_dim = query_states.shape
         if q_len < self.max_capacity_prompt:
@@ -197,35 +222,31 @@ class SnapKVCluster():
             # Step 1: Compute attention scores
             # =================================================================
             if self.num_obs_windows > 1:
-                # --- Improvement 2: Multi-window observation ---
                 attn_weights_sum = self._compute_multi_window_attention(
                     query_states, key_states, head_dim
                 )
-                # For weighted pooling, we still need per-query attention from end window
                 attn_weights_prefix = None
                 if self.pooling == 'weighted':
                     end_q = query_states[:, :, -self.window_size:, :]
                     prefix_k = key_states[:, :, :prefix_len, :]
                     attn_raw = torch.matmul(end_q, prefix_k.transpose(2, 3)) / math.sqrt(head_dim)
                     attn_raw = nn.functional.softmax(attn_raw, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                    attn_weights_prefix = attn_raw  # [B, H, W, prefix_len]
+                    attn_weights_prefix = attn_raw
             else:
-                # --- Original single-window behavior ---
                 attn_weights = torch.matmul(
                     query_states[..., -self.window_size:, :],
                     key_states.transpose(2, 3)
                 ) / math.sqrt(head_dim)
 
-                # Causal mask for observation window attending to itself
                 mask = torch.full((self.window_size, self.window_size),
                                   torch.finfo(attn_weights.dtype).min,
                                   device=attn_weights.device)
                 mask_cond = torch.arange(mask.size(-1), device=attn_weights.device)
                 mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
                 mask = mask.to(attn_weights.device)
-                attention_mask = mask[None, None, :, :]
+                causal_mask = mask[None, None, :, :]
 
-                attn_weights[:, :, -self.window_size:, -self.window_size:] += attention_mask
+                attn_weights[:, :, -self.window_size:, -self.window_size:] += causal_mask
                 attn_weights = nn.functional.softmax(attn_weights, dim=-1,
                                                      dtype=torch.float32).to(query_states.dtype)
 
@@ -233,22 +254,35 @@ class SnapKVCluster():
                 attn_weights_sum = attn_weights_prefix.sum(dim=-2)  # [B, H, prefix_len]
 
             # =================================================================
+            # Step 1b: Aggregate across GQA groups so all query heads sharing
+            # the same KV head vote together for which positions to keep.
+            # =================================================================
+            attn_weights_sum_agg = self._aggregate_gqa_scores(attn_weights_sum, num_key_value_groups)
+            if attn_weights_prefix is not None and num_key_value_groups > 1:
+                b, h_exp, w, pl = attn_weights_prefix.shape
+                h_kv = h_exp // num_key_value_groups
+                attn_weights_prefix_agg = attn_weights_prefix.view(
+                    b, h_kv, num_key_value_groups, w, pl
+                ).mean(dim=2)
+            else:
+                attn_weights_prefix_agg = attn_weights_prefix
+
+            # =================================================================
             # Step 2: Apply pooling (Improvement 1: weighted pooling option)
             # =================================================================
             if self.pooling == 'avgpool':
-                attn_cache = F.avg_pool1d(attn_weights_sum, kernel_size=self.kernel_size,
+                attn_cache = F.avg_pool1d(attn_weights_sum_agg, kernel_size=self.kernel_size,
                                           padding=self.kernel_size // 2, stride=1)
             elif self.pooling == 'maxpool':
-                attn_cache = F.max_pool1d(attn_weights_sum, kernel_size=self.kernel_size,
+                attn_cache = F.max_pool1d(attn_weights_sum_agg, kernel_size=self.kernel_size,
                                           padding=self.kernel_size // 2, stride=1)
             elif self.pooling == 'weighted':
-                if attn_weights_prefix is not None:
-                    attn_cache = self._weighted_pooling(attn_weights_sum, attn_weights_prefix)
+                if attn_weights_prefix_agg is not None:
+                    attn_cache = self._weighted_pooling(attn_weights_sum_agg, attn_weights_prefix_agg)
                 else:
-                    # Fallback: blend avg+max without consistency weighting
-                    avg_pooled = F.avg_pool1d(attn_weights_sum, kernel_size=self.kernel_size,
+                    avg_pooled = F.avg_pool1d(attn_weights_sum_agg, kernel_size=self.kernel_size,
                                               padding=self.kernel_size // 2, stride=1)
-                    max_pooled = F.max_pool1d(attn_weights_sum, kernel_size=self.kernel_size,
+                    max_pooled = F.max_pool1d(attn_weights_sum_agg, kernel_size=self.kernel_size,
                                               padding=self.kernel_size // 2, stride=1)
                     attn_cache = 0.5 * avg_pooled + 0.5 * max_pooled
             else:
@@ -256,34 +290,29 @@ class SnapKVCluster():
 
             # =================================================================
             # Step 3: Select indices (Improvement 3: spike protection)
+            # Operates on KV-head-level scores after GQA aggregation.
             # =================================================================
             if self.protect_spikes:
-                spike_mask = self._identify_critical_spikes(attn_weights_sum)
-                num_spikes_per_head = spike_mask.sum(dim=-1)  # [B, H]
+                spike_mask = self._identify_critical_spikes(attn_weights_sum_agg)
+                num_spikes_per_head = spike_mask.sum(dim=-1)  # [B, H_kv]
                 max_spike_budget = int(budget * self.spike_reserve_ratio)
 
-                # Cap spike budget to not exceed reserve ratio
                 spike_budget = min(max_spike_budget, int(num_spikes_per_head.max().item()))
                 spike_budget = max(spike_budget, 0)
 
                 if spike_budget > 0:
-                    # Select top spikes by their raw attention score (not pooled)
-                    spike_scores = attn_weights_sum.clone()
+                    spike_scores = attn_weights_sum_agg.clone()
                     spike_scores[~spike_mask] = -float('inf')
 
-                    # Handle case where some heads have fewer spikes than spike_budget
                     actual_spike_budget = min(spike_budget, spike_scores.shape[-1])
                     _, spike_indices = spike_scores.topk(actual_spike_budget, dim=-1)
 
-                    # Remove spike positions from pooled scores to avoid double-counting
                     attn_cache_modified = attn_cache.clone()
                     attn_cache_modified.scatter_(2, spike_indices, float('-inf'))
 
-                    # Select remaining positions from pooled scores
                     main_budget = budget - actual_spike_budget
                     _, main_indices = attn_cache_modified.topk(main_budget, dim=-1)
 
-                    # Combine spike + main indices and sort to preserve positional order
                     indices = torch.cat([spike_indices, main_indices], dim=-1)
                     indices = indices.sort(dim=-1).values
                 else:
@@ -292,8 +321,15 @@ class SnapKVCluster():
                 indices = attn_cache.topk(budget, dim=-1).indices
 
             # =================================================================
-            # Step 4: Gather selected KV pairs and concatenate with obs window
+            # Step 4: Gather selected KV pairs and concatenate with obs window.
+            # indices is [B, H_kv, budget] — expand back to expanded heads so
+            # all query heads in a GQA group use the same selected positions.
             # =================================================================
+            if num_key_value_groups > 1:
+                # [B, H_kv, budget] → [B, H_kv, 1, budget] → [B, H_kv, G, budget] → [B, H_exp, budget]
+                indices = indices.unsqueeze(2).expand(-1, -1, num_key_value_groups, -1)
+                indices = indices.reshape(bsz, num_heads, -1)
+
             indices = indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
             k_past_compress = key_states[:, :, :-self.window_size, :].gather(dim=2, index=indices)
             v_past_compress = value_states[:, :, :-self.window_size, :].gather(dim=2, index=indices)
@@ -304,28 +340,36 @@ class SnapKVCluster():
             return key_states, value_states
 
 def init_snapkv(self):
-    if not hasattr(self, "kv_cluster"):
-        if not hasattr(self.config, 'window_size'):
-            self.config.window_size = 32
-        if not hasattr(self.config, 'max_capacity_prompt'):
-            self.config.max_capacity_prompt = 2048
-        if not hasattr(self.config, 'kernel_size'):
-            self.config.kernel_size = 5
-        if not hasattr(self.config, 'pooling'):
-            self.config.pooling = 'avgpool'
-        # === Enhancement config defaults ===
-        if not hasattr(self.config, 'num_obs_windows'):
-            self.config.num_obs_windows = 1
-        if not hasattr(self.config, 'protect_spikes'):
-            self.config.protect_spikes = False
-        if not hasattr(self.config, 'spike_reserve_ratio'):
-            self.config.spike_reserve_ratio = 0.1
-    self.kv_cluster = SnapKVCluster(
-        window_size = self.config.window_size,
-        max_capacity_prompt = self.config.max_capacity_prompt,
-        kernel_size = self.config.kernel_size,
-        pooling = self.config.pooling,
-        num_obs_windows = self.config.num_obs_windows,
-        protect_spikes = self.config.protect_spikes,
-        spike_reserve_ratio = self.config.spike_reserve_ratio,
+    if not hasattr(self.config, 'window_size'):
+        self.config.window_size = 32
+    if not hasattr(self.config, 'max_capacity_prompt'):
+        self.config.max_capacity_prompt = 2048
+    if not hasattr(self.config, 'kernel_size'):
+        self.config.kernel_size = 5
+    if not hasattr(self.config, 'pooling'):
+        self.config.pooling = 'avgpool'
+    if not hasattr(self.config, 'num_obs_windows'):
+        self.config.num_obs_windows = 1
+    if not hasattr(self.config, 'protect_spikes'):
+        self.config.protect_spikes = False
+    if not hasattr(self.config, 'spike_reserve_ratio'):
+        self.config.spike_reserve_ratio = 0.1
+
+    # Only create if missing, or if config changed since last creation.
+    _cfg_key = (
+        self.config.window_size, self.config.max_capacity_prompt,
+        self.config.kernel_size, self.config.pooling,
+        self.config.num_obs_windows, self.config.protect_spikes,
+        self.config.spike_reserve_ratio,
+    )
+    if not hasattr(self, "kv_cluster") or getattr(self, "_kv_cluster_cfg", None) != _cfg_key:
+        self.kv_cluster = SnapKVCluster(
+            window_size=self.config.window_size,
+            max_capacity_prompt=self.config.max_capacity_prompt,
+            kernel_size=self.config.kernel_size,
+            pooling=self.config.pooling,
+            num_obs_windows=self.config.num_obs_windows,
+            protect_spikes=self.config.protect_spikes,
+            spike_reserve_ratio=self.config.spike_reserve_ratio,
         )
+        self._kv_cluster_cfg = _cfg_key
