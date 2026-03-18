@@ -112,5 +112,6 @@ if __name__ == '__main__':
         # out_path_e = f"pred/{args.model}/result_e.json"
         # with open(out_path_e, "w") as f:
         #     json.dump(score_e, f, ensure_ascii=False, indent=4)
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
     with open(out_path, "w") as f:
         json.dump(scores, f, ensure_ascii=False, indent=4)
