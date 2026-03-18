@@ -158,109 +158,52 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True
     torch.cuda.manual_seed_all(seed)
 
+def _model_load_kwargs():
+    """Common kwargs for AutoModelForCausalLM.from_pretrained, compatible with
+    transformers 4.x and 5.x."""
+    from packaging.version import Version
+    from importlib.metadata import version as get_version
+    tv = Version(get_version("transformers"))
+    # transformers >= 5.0 renamed torch_dtype → dtype
+    dtype_key = "dtype" if tv >= Version("5.0.0") else "torch_dtype"
+    return {
+        dtype_key: torch.float16,
+        "low_cpu_mem_usage": True,
+        "device_map": "auto",
+        "use_cache": True,
+    }
+
 def load_model_and_tokenizer(path, model_name, device, compress=False):
+    kwargs = _model_load_kwargs()
+
     if "chatglm" in model_name or "internlm" in model_name or "xgen" in model_name:
         tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=torch.bfloat16).to(device)
+        # These models need trust_remote_code and bfloat16
+        kw = {**kwargs, "trust_remote_code": True}
+        dtype_key = "dtype" if "dtype" in kwargs else "torch_dtype"
+        kw[dtype_key] = torch.bfloat16
+        model = AutoModelForCausalLM.from_pretrained(path, **kw)
     elif "llama2" in model_name:
         tokenizer = AutoTokenizer.from_pretrained(path)
-        model = AutoModelForCausalLM.from_pretrained(path, torch_dtype=torch.bfloat16).to(device)
+        kw = {**kwargs}
+        dtype_key = "dtype" if "dtype" in kwargs else "torch_dtype"
+        kw[dtype_key] = torch.bfloat16
+        model = AutoModelForCausalLM.from_pretrained(path, **kw)
     elif "longchat" in model_name or "vicuna" in model_name:
-        if not compress:
-            model = AutoModelForCausalLM.from_pretrained(
-                    path,
-                    torch_dtype=torch.float16,
-                    low_cpu_mem_usage=True,
-                    device_map="auto",
-                    use_cache=True,
-                    attn_implementation="sdpa"
-                )
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                    path,
-                    torch_dtype=torch.float16,
-                    low_cpu_mem_usage=True,
-                    device_map="auto",
-                    use_cache=True,
-                    attn_implementation="sdpa"
-                )
-        tokenizer = AutoTokenizer.from_pretrained(
-            path,
-            use_fast=False,
-        )
+        model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(path, use_fast=False)
     elif "llama-2" in model_name or "lwm" in model_name:
-        if not compress:
-            model = AutoModelForCausalLM.from_pretrained(
-                    path,
-                    torch_dtype=torch.float16,
-                    low_cpu_mem_usage=True,
-                    device_map="auto",
-                    use_cache=True,
-                    attn_implementation="sdpa"
-                )
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                    path,
-                    torch_dtype=torch.float16,
-                    low_cpu_mem_usage=True,
-                    device_map="auto",
-                    use_cache=True,
-                    attn_implementation="sdpa"
-                )
-        tokenizer = AutoTokenizer.from_pretrained(
-            path,
-            use_fast=False,
-        )
+        model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(path, use_fast=False)
     elif "mistral" in model_name:
-        if not compress:
-            model = AutoModelForCausalLM.from_pretrained(
-                path,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-                device_map="auto",
-                use_cache=True,
-                attn_implementation="sdpa"
-            )
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                path,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-                device_map="auto",
-                use_cache=True,
-                attn_implementation="sdpa"
-            )
-        tokenizer = AutoTokenizer.from_pretrained(
-            path,
-            padding_side="right",
-            use_fast=False,
-        )
+        model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(path, padding_side="right", use_fast=False)
     elif "mixtral" in model_name:
-        if not compress:
-            model = AutoModelForCausalLM.from_pretrained(
-                path,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-                device_map="auto",
-                use_cache=True,
-                attn_implementation="sdpa"
-            )
-        else:
-            model = AutoModelForCausalLM.from_pretrained(
-                path,
-                torch_dtype=torch.float16,
-                low_cpu_mem_usage=True,
-                device_map="auto",
-                use_cache=True,
-                attn_implementation="sdpa"
-            )
-        tokenizer = AutoTokenizer.from_pretrained(
-            path,
-            # padding_side="right",
-            # use_fast=False,
-        )
+        model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(path)
     else:
         raise ValueError(f"Model {model_name} not supported!")
+
     model = model.eval()
     return model, tokenizer
 
