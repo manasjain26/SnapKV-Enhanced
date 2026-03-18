@@ -159,19 +159,28 @@ def prepare_inputs_for_generation_llama_modern(
     Uses kv_seq_len (actual tokens processed) instead of cache.seen_tokens
     (compressed cache length) to correctly identify which tokens are new.
     """
-    if past_key_values is None:
+    # Determine whether the cache is empty.  Transformers 5.x pre-creates an
+    # empty DynamicCache before the first call, so past_key_values is never
+    # None — we must also check seen_tokens == 0.
+    cache_is_empty = past_key_values is None or (
+        isinstance(past_key_values, Cache) and past_key_values.get_seq_length() == 0
+    )
+
+    if cache_is_empty:
         for layer in self.model.layers:
             layer.self_attn.kv_seq_len = 0
 
-    if past_key_values is not None:
+    # kv_seq_len tracks the actual number of input tokens processed (set by
+    # the attention forward), which differs from cache.seen_tokens after
+    # SnapKV compression.
+    past_length = getattr(self.model.layers[0].self_attn, "kv_seq_len", 0)
+
+    if not cache_is_empty:
         if isinstance(past_key_values, Cache):
             cache_length = past_key_values.get_seq_length()
-            # Use the actual tokens processed (kv_seq_len), NOT cache.seen_tokens
-            # which reflects the compressed cache size after SnapKV.
-            past_length = self.model.layers[0].self_attn.kv_seq_len
             max_cache_length = getattr(past_key_values, 'get_max_length', lambda: None)()
         else:
-            cache_length = past_length = self.model.layers[0].self_attn.kv_seq_len
+            cache_length = past_length
             max_cache_length = None
 
         if attention_mask is not None and attention_mask.shape[1] > input_ids.shape[1]:
@@ -190,17 +199,16 @@ def prepare_inputs_for_generation_llama_modern(
     if attention_mask is not None and position_ids is None:
         position_ids = attention_mask.long().cumsum(-1) - 1
         position_ids.masked_fill_(attention_mask == 0, 1)
-        if past_key_values:
+        if past_key_values and not cache_is_empty:
             position_ids = position_ids[:, -input_ids.shape[1]:]
 
     cache_position = kwargs.get("cache_position", None)
     if cache_position is None:
-        past_seen = self.model.layers[0].self_attn.kv_seq_len if past_key_values is not None else 0
         cache_position = torch.arange(
-            past_seen, past_seen + input_ids.shape[1], device=input_ids.device
+            past_length, past_length + input_ids.shape[1], device=input_ids.device
         )
 
-    if inputs_embeds is not None and past_key_values is None:
+    if inputs_embeds is not None and cache_is_empty:
         model_inputs = {"inputs_embeds": inputs_embeds}
     else:
         model_inputs = {"input_ids": input_ids}
