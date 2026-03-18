@@ -12,5 +12,7 @@
     "mixtral-8x7B-instruct-v0.1": "mistralai/Mixtral-8x7B-Instruct-v0.1",
     "llama-2-7B-32k-instruct": "togethercomputer/Llama-2-7B-32K-Instruct",
     "lwm-text-chat-1m": "LargeWorldModel/LWM-Text-Chat-1M",
-    "lwm-text-1m": "LargeWorldModel/LWM-Text-1M"
+    "lwm-text-1m": "LargeWorldModel/LWM-Text-1M",
+    "llama-3.2-1b-instruct": "meta-llama/Llama-3.2-1B-Instruct",
+    "llama-3.2-3b-instruct": "meta-llama/Llama-3.2-3B-Instruct"
 }

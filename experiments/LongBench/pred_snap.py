@@ -14,7 +14,9 @@ def parse_args(args=None):
     parser.add_argument('--model', type=str, default=None, choices=[
         "llama2-7b-chat-4k", "longchat-v1.5-7b-32k", "xgen-7b-8k", 
         "internlm-7b-8k", "chatglm2-6b", "chatglm2-6b-32k", "chatglm3-6b-32k", "vicuna-v1.5-7b-16k",
-        "mistral-7B-instruct-v0.2", "mistral-7B-instruct-v0.1", "llama-2-7B-32k-instruct", "mixtral-8x7B-instruct-v0.1","lwm-text-chat-1m", "lwm-text-1m"])
+        "mistral-7B-instruct-v0.2", "mistral-7B-instruct-v0.1", "llama-2-7B-32k-instruct",
+        "mixtral-8x7B-instruct-v0.1", "lwm-text-chat-1m", "lwm-text-1m",
+        "llama-3.2-1b-instruct", "llama-3.2-3b-instruct"])
     parser.add_argument('--compress_args_path', type=str, default=None, help="Path to the compress args")
     parser.add_argument('--e', action='store_true', help="Evaluate on LongBench-E")
     parser.add_argument('--dataset', type=str, default='qasper', help="Dataset to evaluate on")
@@ -35,6 +37,8 @@ def build_chat(tokenizer, prompt, model_name):
         conv.append_message(conv.roles[0], prompt)
         conv.append_message(conv.roles[1], None)
         prompt = conv.get_prompt()
+    elif "llama-3" in model_name:
+        prompt = prompt
     elif "llama2"  in model_name or "llama-2" in model_name or "lwm" in model_name:
         print('llama2', model_name)
         prompt = f"[INST]{prompt}[/INST]"
@@ -192,6 +196,9 @@ def load_model_and_tokenizer(path, model_name, device, compress=False):
     elif "longchat" in model_name or "vicuna" in model_name:
         model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
         tokenizer = AutoTokenizer.from_pretrained(path, use_fast=False)
+    elif "llama-3" in model_name:
+        model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
+        tokenizer = AutoTokenizer.from_pretrained(path)
     elif "llama-2" in model_name or "lwm" in model_name:
         model = AutoModelForCausalLM.from_pretrained(path, **kwargs)
         tokenizer = AutoTokenizer.from_pretrained(path, use_fast=False)
@@ -252,12 +259,12 @@ if __name__ == '__main__':
         compress_args = None
         write_model_name = model_name
     if args.e:
-        data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test')
+        data = load_dataset('THUDM/LongBench', f"{dataset}_e", split='test', trust_remote_code=True)
         if not os.path.exists(f"pred_e/{write_model_name}"):
             os.makedirs(f"pred_e/{write_model_name}")
         out_path = f"pred_e/{write_model_name}/{dataset}.jsonl"
     else:
-        data = load_dataset('THUDM/LongBench', dataset, split='test')
+        data = load_dataset('THUDM/LongBench', dataset, split='test', trust_remote_code=True)
         if not os.path.exists(f"pred_e/{write_model_name}"):
             os.makedirs(f"pred_e/{write_model_name}")
         out_path = f"pred_e/{write_model_name}/{dataset}.jsonl"
