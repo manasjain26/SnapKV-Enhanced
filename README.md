@@ -42,8 +42,10 @@ pip install -e .
 ### 4. Install Additional Dependencies
 
 ```bash
-pip install datasets jieba rouge_score fuzzywuzzy
+pip install "datasets<3.0" jieba rouge_score fuzzywuzzy
 ```
+
+> **Note:** The `datasets` library v3.0+ has breaking changes that cause issues with LongBench data loading. Pin to `<3.0` to avoid errors.
 
 ### 5. HuggingFace Authentication
 
@@ -99,44 +101,6 @@ bash scripts/run_llama_extra.sh 0
 # Run Mistral on all 16 datasets sequentially
 bash scripts/run_mistral.sh 0
 bash scripts/run_mistral_extra.sh 0
-```
-
-### Multi-GPU (Recommended)
-
-With 2 A100s + 1 A60 (24 GB):
-
-```bash
-# GPU 0 (A100) — Llama core datasets
-bash scripts/run_llama.sh 0 &> llama_log.txt &
-
-# GPU 1 (A100) — Mistral core datasets
-bash scripts/run_mistral.sh 1 &> mistral_log.txt &
-
-# GPU 2 (A60) — Llama extra datasets
-bash scripts/run_llama_extra.sh 2 &> llama_extra_log.txt &
-```
-
-Then once GPUs free up:
-
-```bash
-# GPU 0 — Mistral extra datasets
-bash scripts/run_mistral_extra.sh 0 &> mistral_extra_log.txt &
-
-# GPU 1 — Llama extra datasets (if not already done)
-bash scripts/run_llama_extra.sh 1 &> llama_extra_log2.txt &
-```
-
-Check GPU assignment with:
-
-```bash
-nvidia-smi -L
-```
-
-### Monitor Progress
-
-```bash
-tail -f llama_log.txt
-tail -f mistral_log.txt
 ```
 
 ### Manual Run (Single Dataset)
