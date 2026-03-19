@@ -1,47 +1,195 @@
-# SnapKV :camera:
-We introduce an innovative and out-of-box KV cache compression method, [SnapKV](https://arxiv.org/abs/2404.14469).
-## Requirements
-Currently tested with `transformers==4.37.0`, need to check if it is compatible with higher version.
+# SnapKV-Enhanced
+
+Enhanced version of [SnapKV](https://arxiv.org/abs/2404.14469) — an efficient KV cache compression method for long-context LLMs. This fork introduces three improvements over the original algorithm: **weighted pooling**, **multi-window observation**, and **spike protection**, evaluated on the [LongBench](https://github.com/THUDM/LongBench) benchmark.
+
+## Supported Models
+
+| Model | HuggingFace ID | VRAM (FP16) |
+|---|---|---|
+| Llama-3.2-1B-Instruct | `meta-llama/Llama-3.2-1B-Instruct` | ~2 GB |
+| Llama-3.2-3B-Instruct | `meta-llama/Llama-3.2-3B-Instruct` | ~6 GB |
+| Mistral-7B-Instruct-v0.2 | `mistralai/Mistral-7B-Instruct-v0.2` | ~14 GB |
+
+## Environment Setup
+
+### 1. Create Conda Environment
+
+```bash
+conda create -n snapkv python=3.10 -y
+conda activate snapkv
 ```
-transformers>=4.36
-flash-attn==2.4.0
+
+### 2. Install PyTorch (CUDA 11.8)
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
-## Installation
+
+For CUDA 12.1, use:
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
-git clone git@github.com:FasterDecoding/SnapKV.git
-cd SnapKV
+
+### 3. Install SnapKV-Enhanced
+
+```bash
+git clone https://github.com/manasjain26/SnapKV-Enhanced.git
+cd SnapKV-Enhanced
 pip install -e .
 ```
-## Quick Start
-### Use SnapKV-optimized Models
-For example: 
-```python
-from snapkv.monkeypatch.monkeypatch import replace_mistral
-replace_mistral() # Use monkey patches enable SnapKV
+
+### 4. Install Additional Dependencies
+
+```bash
+pip install datasets jieba rouge_score fuzzywuzzy
 ```
 
-Check [the example notebook](./notebooks/example.ipynb).
+### 5. HuggingFace Authentication
 
-### Customize Your SnapKV-optimized Models
-SnapKV can be easily integrated with other models. 
+Models like Llama-3.2 require accepting the license on HuggingFace. Set your token:
 
-You can follow the comment marked with `[SnapKV]` in [existing models](./snapkv/monkeypatch/monkeypatch.py) to construct your own models. (Currently we support [Llama family](./snapkv/monkeypatch/llama_hijack_4_37.py)/ [Mistral](./snapkv/monkeypatch//mistral_hijack_4_37.py)/ [Mixtral](./snapkv/monkeypatch//mixtral_hijack_4_37.py)) 
+```bash
+export HF_TOKEN="your_huggingface_token"
+```
 
-The detailed algorithm of SnapKV is in [`snapkv_utils.py`](./snapkv/monkeypatch/snapkv_utils.py)
+Or log in interactively:
 
+```bash
+huggingface-cli login
+```
 
-## Partial Results
-![Comprehensive Experiment Results on LongBench](./assets/longbench.jpg)
-![Pressure Test Result on Needle-in-a-Haystack](./assets/LWM-Text-Chat-1M_SnapKV.jpg)
+## Experiment Configurations
 
-## TODO
-- [ ] Add observation experiments for reduplication.
-- [ ] Add LongBench for reduplication.
-- [ ] Explore the prompt phase compression.
+Two configurations are used for comparison:
+
+| Config | Pooling | Observation Windows | Spike Protection |
+|---|---|---|---|
+| `baseline_avgpool` | Average | 1 | No |
+| `enhanced_combined` | Weighted | 3 | Yes |
+
+Config files are in `experiments/LongBench/config/`.
+
+## Running LongBench Experiments
+
+All commands should be run from the `experiments/LongBench/` directory:
+
+```bash
+cd experiments/LongBench
+```
+
+### Available Scripts
+
+| Script | Model | Datasets | Description |
+|---|---|---|---|
+| `run_llama.sh` | Llama-3.2-1B | 5 core | hotpotqa, 2wikimqa, gov_report, passage_retrieval_en, lcc |
+| `run_llama_extra.sh` | Llama-3.2-1B | 11 remaining | narrativeqa, qasper, multifieldqa_en, musique, qmsum, multi_news, trec, triviaqa, samsum, passage_count, repobench-p |
+| `run_mistral.sh` | Mistral-7B | 5 core | hotpotqa, 2wikimqa, gov_report, passage_retrieval_en, lcc |
+| `run_mistral_extra.sh` | Mistral-7B | 11 remaining | Same 11 as llama_extra |
+
+Each script runs both `baseline_avgpool` and `enhanced_combined` configs and **skips existing results**.
+
+### Single GPU
+
+```bash
+# Run Llama on all 16 datasets sequentially
+bash scripts/run_llama.sh 0
+bash scripts/run_llama_extra.sh 0
+
+# Run Mistral on all 16 datasets sequentially
+bash scripts/run_mistral.sh 0
+bash scripts/run_mistral_extra.sh 0
+```
+
+### Multi-GPU (Recommended)
+
+With 2 A100s + 1 A60 (24 GB):
+
+```bash
+# GPU 0 (A100) — Llama core datasets
+bash scripts/run_llama.sh 0 &> llama_log.txt &
+
+# GPU 1 (A100) — Mistral core datasets
+bash scripts/run_mistral.sh 1 &> mistral_log.txt &
+
+# GPU 2 (A60) — Llama extra datasets
+bash scripts/run_llama_extra.sh 2 &> llama_extra_log.txt &
+```
+
+Then once GPUs free up:
+
+```bash
+# GPU 0 — Mistral extra datasets
+bash scripts/run_mistral_extra.sh 0 &> mistral_extra_log.txt &
+
+# GPU 1 — Llama extra datasets (if not already done)
+bash scripts/run_llama_extra.sh 1 &> llama_extra_log2.txt &
+```
+
+Check GPU assignment with:
+
+```bash
+nvidia-smi -L
+```
+
+### Monitor Progress
+
+```bash
+tail -f llama_log.txt
+tail -f mistral_log.txt
+```
+
+### Manual Run (Single Dataset)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python pred_snap.py \
+    --model llama-3.2-1b-instruct \
+    --compress_args_path enhanced_combined.json \
+    --dataset hotpotqa
+```
+
+## Evaluation
+
+Evaluation runs automatically at the end of each script. To evaluate manually:
+
+```bash
+cd experiments/LongBench
+python eval.py --model "llama-3.2-1b-instructbaseline_avgpool"
+python eval.py --model "llama-3.2-1b-instructenhanced_combined"
+```
+
+Results are saved to `experiments/LongBench/pred_e/<model><config>/result.json`.
+
+## Project Structure
+
+```
+SnapKV-Enhanced/
+├── snapkv/
+│   └── monkeypatch/
+│       ├── monkeypatch.py              # Entry point for applying SnapKV patches
+│       ├── snapkv_utils.py             # Core SnapKV algorithm + enhancements
+│       ├── llama_hijack_modern.py       # Llama attention patch (transformers >=4.43)
+│       └── mistral_hijack_modern.py     # Mistral attention patch (transformers >=4.43)
+├── experiments/
+│   └── LongBench/
+│       ├── pred_snap.py                # Prediction script
+│       ├── eval.py                     # Evaluation script
+│       ├── config/                     # Model paths, configs, prompts
+│       │   ├── baseline_avgpool.json
+│       │   ├── enhanced_combined.json
+│       │   ├── model2path.json
+│       │   └── ...
+│       └── scripts/                    # Run scripts
+│           ├── run_llama.sh
+│           ├── run_llama_extra.sh
+│           ├── run_mistral.sh
+│           └── run_mistral_extra.sh
+└── pyproject.toml
+```
 
 ## Citation
-If you feel this project is helpful, please consider cite our report :blush:
-```
+
+```bibtex
 @article{li2024snapkv,
   title={SnapKV: LLM Knows What You are Looking for Before Generation},
   author={Li, Yuhong and Huang, Yingbing and Yang, Bowen and Venkitesh, Bharat and Locatelli, Acyr and Ye, Hanchen and Cai, Tianle and Lewis, Patrick and Chen, Deming},
